@@ -1,7 +1,9 @@
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using QuizApp.Api.Data;
+using QuizApp.Api.Features.Attempts;
 using QuizApp.Api.Features.Quizzes;
+using QuizApp.Api.Features.Users;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,6 +14,7 @@ builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddProblemDetails();
+builder.Services.AddSingleton(TimeProvider.System);
 
 var app = builder.Build();
 
@@ -28,6 +31,8 @@ using (var scope = app.Services.CreateScope())
 
 app.MapGet("/", () => Results.Redirect("/quizzes")).ExcludeFromDescription();
 app.MapQuizEndpoints();
+app.MapUserEndpoints().MapUserStatsEndpoints();
+app.MapAttemptEndpoints();
 
 app.Run();
 

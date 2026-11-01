@@ -31,18 +31,19 @@ A time-boxed MVP: users take seeded quizzes, submit their answers, and get a sco
 | GET | `/quizzes/{id}` | questions + options, **no IsCorrect, no Explanation** |
 | POST | `/quizzes` | 201; 400 unless title, ≥1 question, each with text + explanation, ≥2 options, exactly one correct |
 | POST | `/attempts` | body `{ userId, quizId }` → 201, 404 if user/quiz is missing |
-| POST | `/attempts/{id}/submit` | body `{ answers: [{ questionId, optionId }] }` → 200 + result |
-| GET | `/attempts/{id}/result` | 404 if missing, 409 if not completed |
+| POST | `/attempts/{id}/submit` | body `{ userId, answers: [{ questionId, optionId }] }` → 200 + result |
+| GET | `/attempts/{id}` | 404 if missing; status only while in progress, full result once completed |
 | GET | `/users/{id}/attempts` | history, newest first |
 | GET | `/users/{id}/stats` | attempts, completed, average/best score, per-quiz breakdown |
 
 **DTO rule:** quiz and in-progress attempt DTOs never expose `IsCorrect` or `Explanation`. The **completed result** is the only place that shows the selected option, the correct option, and the explanation for each question, plus the notification status.
 
 ## Submit and scoring
-- Validation: body or `answers` is null → 400. A question that isn't in the quiz, an option that doesn't belong to its question, or a duplicate `questionId` → 400. Attempt not found → 404. Already completed → 409.
-- Single choice. A question with no answer counts as incorrect. A partial submission is allowed.
-- Scoring and the performance message are **pure static functions**, so they can be unit tested.
-- **Concurrent submit → 409:** `Attempt.Status` is an EF concurrency token. If two submits race, one of them gets a `DbUpdateConcurrencyException`, which maps to 409. The unique index on `Notification.AttemptId` is the backstop.
+- Check order: attempt not found → 404, already completed → 409, then validation → 400. Validation covers a null body, null `userId`/`answers`/item/`questionId`/`optionId`, a `userId` that isn't the attempt's owner, a question that isn't in the quiz, an option that doesn't belong to its question, and a duplicate `questionId`.
+- Single choice. A question with no answer counts as incorrect. A partial submission (or an empty list) is allowed. To leave a question unanswered, omit it; `optionId: null` is a 400.
+- Emails are trimmed and lowercased before the uniqueness check.
+- `Scoring` (Grade, CalculateScore, Summarize), `PerformanceMessages.For` (bands 100 / ≥80 / ≥60 / ≥40 / below) and `SubmitValidator.Validate` are **pure static functions** with no EF.
+- **Concurrent submit → 409, never 500:** both racers can pass the status check. The loser's `SaveChanges` then fails, either on the unique index (`AttemptAnswers(AttemptId, QuestionId)`, `Notification.AttemptId`) → `DbUpdateException` with SQLite code 2067, or on the `Status` concurrency token → `DbUpdateConcurrencyException`. Both map to 409. The smoke test hit the unique-index path in 4 of 5 rounds. EF still writes its own `fail:` log entry for the failed save.
 - The answers, the completed attempt, and a `Pending` Notification are saved in **one `SaveChanges`** (the outbox).
 - A retake is a new attempt.
 
@@ -63,7 +64,7 @@ No auth: `userId` comes in the request and anyone can read any user's data. Quiz
 Each phase ends with: `dotnet build` passes → stop any running server → commit.
 
 1. **Scaffold + entities + seed + quiz endpoints.** Solution, API, and an empty test project. Entities + DbContext, UTC DateTime converter, string enums, unique indexes. Seed with the correct option in varied positions. EF command logs at Warning. `AsSplitQuery` for quiz details. `launchBrowser: false`. `.gitignore` (bin/obj/*.db; **keeps `.chat-history/`**). `GET /quizzes`, `GET /quizzes/{id}`, `POST /quizzes`.
-2. **Users, attempts, submit, scoring, stats.** Pure scoring and message functions. All validations (400/404/409, null bodies). Concurrency token → 409 on concurrent submit. Pending Notification in the same `SaveChanges`. Result, history, stats endpoints.
+2. **Users, attempts, submit, scoring, stats.** Pure scoring and message functions. All validations (400/404/409, null bodies). Unique index + concurrency token → 409 on concurrent submit. Pending Notification in the same `SaveChanges`. `GET /attempts/{id}`, history, stats endpoints.
 3. **Notification worker.** Scope factory, per-row try/catch, exponential backoff, `Failed` after max retries, back to `Pending` on cancel, email with name + email, failing-email profile, `run.sh`, Rider `.http` file.
 4. **Tests + review with subagents.** `test-writer` for scoring, messages, validations, and the worker. `reviewer` for answer-key leaks, outbox robustness, and data integrity. Fix the findings.
 5. **README, GitHub push, zip.** README (run, endpoints, design choices, assumptions). Push (I'll confirm the repo name and visibility first). Zip without bin/obj/db.
