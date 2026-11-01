@@ -32,11 +32,16 @@ A time-boxed MVP: users take seeded quizzes, submit their answers, and get a sco
 | POST | `/quizzes` | 201; 400 unless title, ≥1 question, each with text + explanation, ≥2 options, exactly one correct |
 | POST | `/attempts` | body `{ userId, quizId }` → 201, 404 if user/quiz is missing |
 | POST | `/attempts/{id}/submit` | body `{ userId, answers: [{ questionId, optionId }] }` → 200 + result |
-| GET | `/attempts/{id}` | 404 if missing; status only while in progress, full result once completed |
+| GET | `/attempts/{id}?userId=` | owner only: 400 without `userId`, 404 if missing **or not the owner** (indistinguishable); status only while in progress, full result once completed |
 | GET | `/users/{id}/attempts` | history, newest first |
 | GET | `/users/{id}/stats` | attempts, completed, average/best score, per-quiz breakdown |
 
-**DTO rule:** quiz and in-progress attempt DTOs never expose `IsCorrect` or `Explanation`. The **completed result** is the only place that shows the selected option, the correct option, and the explanation for each question, plus the notification status.
+**DTO rule:** quiz and in-progress attempt DTOs never expose `IsCorrect` or `Explanation`. The **completed result** is the only place that shows the selected option, the correct option, and the explanation for each question, plus the notification status. Only the attempt's owner can read it.
+
+**Answer-key hygiene** (from the phase 4 review):
+- Seed options are balanced by position and by length: the distractors are as long and specific as the correct answer. `SeedIntegrityTests` fails if "pick the longest/shortest" beats chance; the old seed scored 12/12 that way.
+- `GET /attempts/{id}` requires `?userId=` and returns 404 to non-owners, so walking sequential attempt ids no longer reveals the key.
+- **Known residual risk:** with no auth, `userId` is a claim, not a proof. Someone who guesses another user's id plus one of their attempt ids can still read that result. A user can also submit an empty attempt, read the key, and retake for 100. Both are accepted for this MVP; real auth (and possibly hiding the correct option until a cooldown) would close them.
 
 ## Submit and scoring
 - Check order: attempt not found → 404, already completed → 409, then validation → 400. Validation covers a null body, null `userId`/`answers`/item/`questionId`/`optionId`, a `userId` that isn't the attempt's owner, a question that isn't in the quiz, an option that doesn't belong to its question, and a duplicate `questionId`.
@@ -74,5 +79,5 @@ Each phase ends with: `dotnet build` passes → stop any running server → comm
 1. **Scaffold + entities + seed + quiz endpoints.** Solution, API, and an empty test project. Entities + DbContext, UTC DateTime converter, string enums, unique indexes. Seed with the correct option in varied positions. EF command logs at Warning. `AsSplitQuery` for quiz details. `launchBrowser: false`. `.gitignore` (bin/obj/*.db; **keeps `.chat-history/`**). `GET /quizzes`, `GET /quizzes/{id}`, `POST /quizzes`.
 2. **Users, attempts, submit, scoring, stats.** Pure scoring and message functions. All validations (400/404/409, null bodies). Unique index + concurrency token → 409 on concurrent submit. Pending Notification in the same `SaveChanges`. `GET /attempts/{id}`, history, stats endpoints.
 3. **Notification worker.** Scope factory, per-row try/catch, `Sending` claim with a lease, exponential backoff, `Failed` after max retries, back to `Pending` on cancel, email with name + email, failing-email profile, `run.sh`, Rider `.http` file. Build only, no run.
-4. **Tests + review with subagents.** `test-writer` for scoring, messages, validations, and the worker. `reviewer` for answer-key leaks, outbox robustness, and data integrity. Fix the findings.
+4. **Tests + review with subagents.** `test-writer` for scoring, messages, validations, and the worker. `reviewer` for answer-key leaks, outbox robustness, and data integrity. Fixed the two High findings (seed length leak, owner check on `GET /attempts/{id}`). The Medium/Low findings are deferred by the user's decision.
 5. **README, GitHub push, zip.** README (run, endpoints, design choices, assumptions). Push (I'll confirm the repo name and visibility first). Zip without bin/obj/db.

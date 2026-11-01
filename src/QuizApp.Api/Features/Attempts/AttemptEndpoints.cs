@@ -49,13 +49,23 @@ public static class AttemptEndpoints
 
         var dto = new AttemptStatusDto(attempt.Id, attempt.UserId, attempt.QuizId, quiz.Title,
             attempt.Status, attempt.StartedAt, attempt.TotalQuestions);
-        return Results.CreatedAtRoute("GetAttemptById", new { id = attempt.Id }, dto);
+        return Results.CreatedAtRoute("GetAttemptById", new { id = attempt.Id, userId = attempt.UserId }, dto);
     }
 
-    private static async Task<IResult> GetById(int id, QuizDbContext db, CancellationToken ct)
+    /// <summary>
+    /// The completed view contains the answer key, so only the attempt's owner may read it.
+    /// No auth (accepted MVP assumption): the caller states who they are via ?userId=.
+    /// A non-owner gets the same 404 as a missing attempt, so attempt ids can't be probed.
+    /// </summary>
+    private static async Task<IResult> GetById(int id, int? userId, QuizDbContext db, CancellationToken ct)
     {
+        if (userId is null) return ApiErrors.BadRequest("userId", "userId query parameter is required.");
+
+        var owned = await db.Attempts.AnyAsync(a => a.Id == id && a.UserId == userId, ct);
+        if (!owned) return ApiErrors.NotFound($"Attempt {id} not found for user {userId}.");
+
         var dto = await LoadAttemptView(db, id, ct);
-        return dto is null ? ApiErrors.NotFound($"Attempt {id} not found.") : Results.Ok(dto);
+        return dto is null ? ApiErrors.NotFound($"Attempt {id} not found for user {userId}.") : Results.Ok(dto);
     }
 
     private static async Task<IResult> Submit(int id, SubmitAttemptRequest? request, QuizDbContext db, TimeProvider clock, CancellationToken ct)

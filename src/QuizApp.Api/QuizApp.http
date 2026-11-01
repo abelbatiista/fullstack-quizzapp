@@ -67,8 +67,8 @@ Content-Type: application/json
     client.global.set("attemptId", response.body.id);
 %}
 
-### 5. Get in-progress attempt (status only)
-GET {{baseUrl}}/attempts/{{attemptId}}
+### 5. Get in-progress attempt (status only; only the owner may read it)
+GET {{baseUrl}}/attempts/{{attemptId}}?userId={{userId}}
 
 > {%
     client.test("status only while in progress", () => {
@@ -103,7 +103,7 @@ Content-Type: application/json
 %}
 
 ### 7. Get result (breakdown + explanations + notification status; re-run after a few seconds to see Sent)
-GET {{baseUrl}}/attempts/{{attemptId}}
+GET {{baseUrl}}/attempts/{{attemptId}}?userId={{userId}}
 
 > {%
     client.test("completed result", () => {
@@ -114,6 +114,15 @@ GET {{baseUrl}}/attempts/{{attemptId}}
         client.assert(response.body.questions.every(q => q.explanation), "explanations present");
     });
     client.log("notificationStatus: " + response.body.notificationStatus);
+%}
+
+### 7b. Someone else's result → 404 (the answer key is only shown to the owner)
+GET {{baseUrl}}/attempts/{{attemptId}}?userId=999999
+
+> {%
+    client.test("non-owner can't read the result", () => {
+        client.assert(response.status === 404, "expected 404, got " + response.status);
+    });
 %}
 
 ### 8. Double submit → 409
