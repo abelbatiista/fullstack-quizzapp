@@ -1,0 +1,195 @@
+# QuizApp end-to-end walkthrough (JetBrains Rider / IntelliJ HTTP Client).
+# Start the API first: ./run.sh            (or ./run.sh failing-email to watch retries fail)
+# Run the requests top to bottom; each one stores ids for the next with client.global.set.
+
+@baseUrl = http://localhost:5003
+
+### 1. Create user (timestamped email so the file can be re-run without a 409)
+POST {{baseUrl}}/users
+Content-Type: application/json
+
+{
+  "name": "Ada Lovelace",
+  "email": "Ada.{{$timestamp}}@Example.com"
+}
+
+> {%
+    client.test("user created", () => {
+        client.assert(response.status === 201, "expected 201, got " + response.status);
+        client.assert(response.body.email === response.body.email.toLowerCase(), "email should be lowercased");
+    });
+    client.global.set("userId", response.body.id);
+%}
+
+### 2. List quizzes
+GET {{baseUrl}}/quizzes
+
+> {%
+    client.test("quizzes listed", () => {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.length >= 2, "expected the 2 seeded quizzes");
+    });
+    client.global.set("quizId", response.body[0].id);
+%}
+
+### 3. Get quiz (no isCorrect / explanation in the response)
+GET {{baseUrl}}/quizzes/{{quizId}}
+
+> {%
+    client.test("quiz has no answer key", () => {
+        client.assert(response.status === 200, "expected 200");
+        const raw = JSON.stringify(response.body);
+        client.assert(!raw.includes("isCorrect") && !raw.includes("explanation"), "answer key leaked");
+    });
+    // The API never says which option is correct. These positions come from the seed
+    // (DbSeeder: quiz 1 correct answers are at indexes 2, 0, 3, 1, 3, 0).
+    const correctAt = [2, 0, 3, 1, 3, 0];
+    response.body.questions.forEach((q, i) => {
+        client.global.set("q" + (i + 1), q.id);
+        client.global.set("o" + (i + 1), q.options[correctAt[i]].id);
+    });
+%}
+
+### 4. Start attempt
+POST {{baseUrl}}/attempts
+Content-Type: application/json
+
+{
+  "userId": {{userId}},
+  "quizId": {{quizId}}
+}
+
+> {%
+    client.test("attempt started", () => {
+        client.assert(response.status === 201, "expected 201");
+        client.assert(response.body.status === "InProgress", "expected InProgress");
+    });
+    client.global.set("attemptId", response.body.id);
+%}
+
+### 5. Get in-progress attempt (status only)
+GET {{baseUrl}}/attempts/{{attemptId}}
+
+> {%
+    client.test("status only while in progress", () => {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.status === "InProgress", "expected InProgress");
+        client.assert(response.body.questions === undefined, "no breakdown before submit");
+    });
+%}
+
+### 6. Submit: 5 correct, question 6 left unanswered (omitted) → 5/6 = 83.33
+POST {{baseUrl}}/attempts/{{attemptId}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{userId}},
+  "answers": [
+    { "questionId": {{q1}}, "optionId": {{o1}} },
+    { "questionId": {{q2}}, "optionId": {{o2}} },
+    { "questionId": {{q3}}, "optionId": {{o3}} },
+    { "questionId": {{q4}}, "optionId": {{o4}} },
+    { "questionId": {{q5}}, "optionId": {{o5}} }
+  ]
+}
+
+> {%
+    client.test("scored 5/6", () => {
+        client.assert(response.status === 200, "expected 200, got " + response.status);
+        client.assert(response.body.correctCount === 5 && response.body.totalQuestions === 6, "expected 5/6");
+        client.assert(response.body.score === 83.33, "expected 83.33");
+        client.assert(response.body.notificationStatus === "Pending", "outbox row should be Pending");
+    });
+%}
+
+### 7. Get result (breakdown + explanations + notification status; re-run after a few seconds to see Sent)
+GET {{baseUrl}}/attempts/{{attemptId}}
+
+> {%
+    client.test("completed result", () => {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.status === "Completed", "expected Completed");
+        client.assert(response.body.questions.length === 6, "expected 6 questions");
+        client.assert(response.body.questions[5].selectedOptionId === null, "q6 should be unanswered");
+        client.assert(response.body.questions.every(q => q.explanation), "explanations present");
+    });
+    client.log("notificationStatus: " + response.body.notificationStatus);
+%}
+
+### 8. Double submit → 409
+POST {{baseUrl}}/attempts/{{attemptId}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{userId}},
+  "answers": []
+}
+
+> {%
+    client.test("second submit rejected", () => {
+        client.assert(response.status === 409, "expected 409, got " + response.status);
+    });
+%}
+
+### 9a. Retake: start a new attempt on the same quiz
+POST {{baseUrl}}/attempts
+Content-Type: application/json
+
+{
+  "userId": {{userId}},
+  "quizId": {{quizId}}
+}
+
+> {%
+    client.test("retake is a new attempt", () => {
+        client.assert(response.status === 201, "expected 201");
+        client.assert(response.body.id != client.global.get("attemptId"), "expected a new attempt id");
+    });
+    client.global.set("retakeId", response.body.id);
+%}
+
+### 9b. Retake: submit all 6 correct → 100
+POST {{baseUrl}}/attempts/{{retakeId}}/submit
+Content-Type: application/json
+
+{
+  "userId": {{userId}},
+  "answers": [
+    { "questionId": {{q1}}, "optionId": {{o1}} },
+    { "questionId": {{q2}}, "optionId": {{o2}} },
+    { "questionId": {{q3}}, "optionId": {{o3}} },
+    { "questionId": {{q4}}, "optionId": {{o4}} },
+    { "questionId": {{q5}}, "optionId": {{o5}} },
+    { "questionId": {{q6}}, "optionId": {{o6}} }
+  ]
+}
+
+> {%
+    client.test("perfect retake", () => {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.score === 100, "expected 100");
+    });
+%}
+
+### 10. History (newest first)
+GET {{baseUrl}}/users/{{userId}}/attempts
+
+> {%
+    client.test("history", () => {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.length === 2, "expected 2 attempts");
+        client.assert(response.body[0].id == client.global.get("retakeId"), "newest first");
+    });
+%}
+
+### 11. Stats
+GET {{baseUrl}}/users/{{userId}}/stats
+
+> {%
+    client.test("stats", () => {
+        client.assert(response.status === 200, "expected 200");
+        client.assert(response.body.completedAttempts === 2, "expected 2 completed");
+        client.assert(response.body.bestScore === 100, "expected best 100");
+        client.assert(response.body.averageScore === 91.67, "expected average 91.67");
+    });
+%}

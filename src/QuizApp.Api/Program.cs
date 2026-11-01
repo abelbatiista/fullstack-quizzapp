@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using QuizApp.Api.Data;
 using QuizApp.Api.Features.Attempts;
+using QuizApp.Api.Features.Notifications;
 using QuizApp.Api.Features.Quizzes;
 using QuizApp.Api.Features.Users;
 
@@ -15,6 +16,21 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 
 builder.Services.AddProblemDetails();
 builder.Services.AddSingleton(TimeProvider.System);
+
+builder.Services.AddOptions<NotificationOptions>()
+    .Bind(builder.Configuration.GetSection(NotificationOptions.Section))
+    .ValidateDataAnnotations()
+    .Validate(o => o.PollInterval > TimeSpan.Zero && o.BaseDelay >= TimeSpan.Zero && o.MaxDelay >= o.BaseDelay
+                   && o.LeaseDuration > TimeSpan.Zero,
+        "Notifications: PollInterval and LeaseDuration must be > 0, and MaxDelay >= BaseDelay >= 0.")
+    .ValidateOnStart();
+builder.Services.AddOptions<EmailOptions>()
+    .Bind(builder.Configuration.GetSection(EmailOptions.Section))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+
+builder.Services.AddSingleton<IEmailSender, MockEmailSender>();
+builder.Services.AddHostedService<NotificationDispatcherService>();
 
 var app = builder.Build();
 

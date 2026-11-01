@@ -16,7 +16,7 @@ A time-boxed MVP: users take seeded quizzes, submit their answers, and get a sco
 | Option | Id, QuestionId, Text, IsCorrect (exactly one per question) |
 | Attempt | Id, UserId, QuizId, Status (InProgress/Completed), StartedAt, CompletedAt, CorrectCount, TotalQuestions, Score (`double`, 0–100) |
 | AttemptAnswer | Id, AttemptId, QuestionId, OptionId (nullable = unanswered), IsCorrect |
-| Notification | Id, AttemptId (unique index), Status (Pending/Sent/Failed), RetryCount, LastError, NextAttemptAt, CreatedAt, SentAt |
+| Notification | Id, AttemptId (unique index), Status (Pending/Sending/Sent/Failed), RetryCount, LastError, NextAttemptAt, CreatedAt, SentAt |
 
 - `Score` is a `double` because EF Core SQLite can't aggregate `decimal` (`Avg`/`Max`/`Sum`). It's rounded to 2 decimals in DTOs.
 - Enums are stored as strings, so the database stays readable.
@@ -48,14 +48,22 @@ A time-boxed MVP: users take seeded quizzes, submit their answers, and get a sco
 - A retake is a new attempt.
 
 ## Notification worker (outbox)
-- `BackgroundService` + `IServiceScopeFactory`. It creates a new scope per poll.
-- Each poll picks rows where `Status = Pending` and `NextAttemptAt <= now`, oldest first, in small batches.
-- Each row has its own try/catch, so one failure never stops the batch.
-- On failure: `RetryCount++`, set `LastError`, set `NextAttemptAt = now + base * 2^RetryCount` (capped). After `MaxRetries` the row becomes `Failed`.
-- On shutdown or cancel, a row being processed is put back to `Pending` and is not counted as a failure.
-- `IEmailSender` → `MockEmailSender` logs the email (user name + email, quiz, score). `FailureRate` comes from config. Randomness is injected, so tests are deterministic.
-- A `FailingEmail` launch profile / appsettings sets a high failure rate to demonstrate retries.
-- Delivery is **at-least-once**: a crash between the send and the save can send the email twice. That's acceptable for the mock and is documented.
+- `NotificationDispatcherService` (`BackgroundService`) uses `IServiceScopeFactory`. One scope fetches the due ids, then **each notification gets its own scope and its own try/catch**, so one bad row never poisons the batch or the change tracker.
+- **Due:** `(Status = Pending OR Sending) AND NextAttemptAt <= now`, oldest first, `BatchSize` per poll. `PollInterval` and `TimeProvider` come from config.
+- **Claim with a lease:** before sending, the row is set to `Sending` with `NextAttemptAt = now + LeaseDuration`. If the process dies mid-send, the lease expires and the row is due again, so nothing is stuck in `Sending`.
+- **Success:** `Sent` + `SentAt`. This save uses `CancellationToken.None`, because the email has already gone out.
+- **Failure** (`NotificationRetryPolicy.MarkFailed`, pure): stores `LastError` (type + message, truncated to 2000 chars). If `RetryCount < MaxRetries`, it does `RetryCount++` and sets `NextAttemptAt = now + BaseDelay * 2^(RetryCount-1)`, capped at `MaxDelay`. Otherwise the row becomes `Failed`. So `MaxRetries = 2` means 3 sends, then `Failed` with `RetryCount = 2`.
+- **Cancelled mid-send:** the row goes back to `Pending` (due now, not counted as a failure). It's saved with `CancellationToken.None` and the cancellation is rethrown.
+- Poll-level errors (e.g. a locked DB) are logged, and the loop continues on the next interval. `Notifications:Enabled=false` turns the worker off (for tests). `DispatchDueAsync` is public, so tests can drive one batch directly.
+- `IEmailSender` → `MockEmailSender` logs the email after a `SimulatedLatency` delay and throws `EmailDeliveryException` when `Random.Shared.NextDouble() < FailureRate`. This uses `Random.Shared` as requested, not injected randomness. Tests stay deterministic with `FailureRate` 0 (never fails) or 1 (always fails), or with a fake `IEmailSender`.
+- The email (`NotificationEmailBuilder.Build`, pure) includes the user's name + email, quiz title, correct/total, percentage, performance message, and completedAt (UTC).
+- Options are bound via `IOptions` (`Notifications`, `Email` sections) with data-annotation validation and `ValidateOnStart`.
+- The `failing-email` launch profile sets `FailureRate=1`, `MaxRetries=2`, `BaseDelay=2s`, `PollInterval=1s`.
+- Delivery is **at-least-once**: a crash between the send and the `Sent` save, or an expired lease on a slow send, can send the email twice. That's acceptable for the mock.
+
+## Dev tooling
+- `./run.sh [profile] [--keep-db]`: runs from `src/QuizApp.Api` (the DB path is relative). It deletes `quizapp.db*` unless `--keep-db` is passed, and validates the profile name.
+- `src/QuizApp.Api/QuizApp.http`: a Rider HTTP client walkthrough with `client.global.set` chaining and `client.test` assertions. The correct options are picked by their known seed positions, because the API never exposes them.
 
 ## Assumptions
 No auth: `userId` comes in the request and anyone can read any user's data. Quizzes are seeded and can be created via POST, but there's no update or delete (attempts reference them). Submitting twice → 409. Explanations appear only after completion. SQLite runs as a single process, which is fine for one worker.
@@ -65,6 +73,6 @@ Each phase ends with: `dotnet build` passes → stop any running server → comm
 
 1. **Scaffold + entities + seed + quiz endpoints.** Solution, API, and an empty test project. Entities + DbContext, UTC DateTime converter, string enums, unique indexes. Seed with the correct option in varied positions. EF command logs at Warning. `AsSplitQuery` for quiz details. `launchBrowser: false`. `.gitignore` (bin/obj/*.db; **keeps `.chat-history/`**). `GET /quizzes`, `GET /quizzes/{id}`, `POST /quizzes`.
 2. **Users, attempts, submit, scoring, stats.** Pure scoring and message functions. All validations (400/404/409, null bodies). Unique index + concurrency token → 409 on concurrent submit. Pending Notification in the same `SaveChanges`. `GET /attempts/{id}`, history, stats endpoints.
-3. **Notification worker.** Scope factory, per-row try/catch, exponential backoff, `Failed` after max retries, back to `Pending` on cancel, email with name + email, failing-email profile, `run.sh`, Rider `.http` file.
+3. **Notification worker.** Scope factory, per-row try/catch, `Sending` claim with a lease, exponential backoff, `Failed` after max retries, back to `Pending` on cancel, email with name + email, failing-email profile, `run.sh`, Rider `.http` file. Build only, no run.
 4. **Tests + review with subagents.** `test-writer` for scoring, messages, validations, and the worker. `reviewer` for answer-key leaks, outbox robustness, and data integrity. Fix the findings.
 5. **README, GitHub push, zip.** README (run, endpoints, design choices, assumptions). Push (I'll confirm the repo name and visibility first). Zip without bin/obj/db.

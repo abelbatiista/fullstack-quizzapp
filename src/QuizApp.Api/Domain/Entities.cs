@@ -2,7 +2,8 @@ namespace QuizApp.Api.Domain;
 
 public enum AttemptStatus { InProgress, Completed }
 
-public enum NotificationStatus { Pending, Sent, Failed }
+/// <summary>Pending → Sending (claimed, with a lease) → Sent | Pending (retry) | Failed.</summary>
+public enum NotificationStatus { Pending, Sending, Sent, Failed }
 
 public class User
 {

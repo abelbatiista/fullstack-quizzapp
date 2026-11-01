@@ -18,6 +18,19 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
+    },
+    "failing-email": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": false,
+      "applicationUrl": "http://localhost:5003",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "Email__FailureRate": "1",
+        "Notifications__MaxRetries": "2",
+        "Notifications__BaseDelay": "00:00:02",
+        "Notifications__PollInterval": "00:00:01"
+      }
     }
   }
 }
