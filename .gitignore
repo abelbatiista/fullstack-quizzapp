@@ -1,0 +1,17 @@
+# Build output
+bin/
+obj/
+
+# IDE / OS
+.idea/
+.DS_Store
+
+# SQLite database files (quizapp.db, -shm, -wal)
+*.db*
+
+# Local-only Claude settings
+.claude/settings.local.json
+
+# Chat history is part of the project record: never ignore it.
+!.chat-history/
+!.chat-history/**
